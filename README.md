@@ -28,3 +28,4 @@ Largely made according to my friend wosted's niche uses
 - Blender 4.0+
 - Mesh must have shapekeys (lol)
 
+The '_init_.py' file is the source code and the only file in the zip if using the file itself is preferred
