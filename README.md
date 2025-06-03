@@ -13,18 +13,18 @@ Largely made according to my friend wosted's niche uses
 
 ## Installation
 
-1. Download `__init__.py`
+1. Download the zip file
 2. In Blender: Edit > Preferences > Add-ons > Install
 3. Select the file and enable "Mesh: Shapekey Tools"
 
 ## Usage
 
-1. Select a mesh with shape keys
-2. Choose a shape key (not Basis)
+1. Select a mesh with shapekeys
+2. Choose a shapekey (not Basis)
 3. Find tools in Properties > Mesh Data > Shape Keys > Shape Key Tools panel
 
 ## Requirements
 
 - Blender 4.0+
-- Mesh must have shape keys (lol)
+- Mesh must have shapekeys (lol)
 
