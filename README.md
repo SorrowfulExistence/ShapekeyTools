@@ -1,6 +1,7 @@
 # Shapekey Tools
 
 Blender addon with some niche utilities for working with shape keys
+
 Largely made according to my friend wosted's specifications
 
 ## Features
