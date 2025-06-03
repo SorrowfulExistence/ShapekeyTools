@@ -9,6 +9,7 @@ bl_info = {
 }
 
 #if it gives a warning in your IDE, it's because the libraries are in Blender, it should be fine
+#the type: ignore comments suppress the many warnings
 import bpy
 from mathutils import Vector
 
