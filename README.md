@@ -1,8 +1,8 @@
 # Shapekey Tools
 
-Blender addon with some niche utilities for working with shape keys
+Blender addon with various utilities for working with shape keys
 
-Largely made according to my friend wosted's specifications
+Largely made according to my friend wosted's niche uses
 
 ## Features
 
