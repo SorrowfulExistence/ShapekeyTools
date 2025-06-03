@@ -3,13 +3,11 @@ bl_info = {
     "author": "SorrowfulExistence",
     "version": (1, 0, 0),
     "blender": (4, 0, 0),
-    "location": "properties > mesh data > shape keys",
+    "location": "Properties > Mesh Data > Shape Keys",
     "description": "various tools for working with shape keys",
     "category": "Mesh",
 }
-
-#if it gives a warning in your IDE, it's because the libraries are in Blender, it should be fine
-#the type: ignore comments suppress the many warnings
+#don't worry about library warning on your environment, it works based on Blender so it can't be easily tested on solely an IDE
 import bpy
 from mathutils import Vector
 
@@ -67,9 +65,9 @@ class MESH_OT_select_shapekey_vertices(bpy.types.Operator):
         #update the mesh
         mesh.update()
         
-        #restore previous mode
-        if mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode=mode)
+        #switch to edit mode and vertex selection mode
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='VERT')
         
         self.report({'INFO'}, f"Selected {affected_count} affected vertices")
         return {'FINISHED'}
@@ -136,9 +134,9 @@ class MESH_OT_select_shapekey_faces(bpy.types.Operator):
         #update the mesh
         mesh.update()
         
-        #restore previous mode
-        if mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode=mode)
+        #switch to edit mode and face selection mode
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='FACE')
         
         self.report({'INFO'}, f"Selected {affected_count} affected faces")
         return {'FINISHED'}
@@ -169,6 +167,14 @@ class MESH_OT_blend_shapekey_from_vgroup(bpy.types.Operator):
                 obj.active_shape_key_index > 0 and
                 len(obj.vertex_groups) > 0)
     
+    def invoke(self, context, event):
+        #get the vertex group from window manager property
+        if hasattr(context.window_manager, 'shapekey_tools_vgroup'):
+            self.vertex_group = context.window_manager.shapekey_tools_vgroup
+        if hasattr(context.window_manager, 'shapekey_tools_vgroup_invert'):
+            self.invert = context.window_manager.shapekey_tools_vgroup_invert
+        return self.execute(context)
+    
     def execute(self, context):
         obj = context.active_object
         mesh = obj.data
@@ -176,7 +182,7 @@ class MESH_OT_blend_shapekey_from_vgroup(bpy.types.Operator):
         #get vertex group
         vgroup = obj.vertex_groups.get(self.vertex_group)
         if not vgroup:
-            self.report({'ERROR'}, "Vertex group not found")
+            self.report({'ERROR'}, f"Vertex group '{self.vertex_group}' not found")
             return {'CANCELLED'}
         
         #get shape keys
@@ -221,34 +227,37 @@ class MESH_OT_blend_shapekey_from_vgroup(bpy.types.Operator):
 
 
 class MESH_OT_blend_to_basis_by_distance(bpy.types.Operator):
-    """Blend vertices back to basis based on how far they've moved"""
+    """Clean up shape keys by resetting vertices with minimal movement to basis. Can be used iteratively - each use recalculates and cleans the specified percentage of remaining moving vertices"""
     bl_idname = "mesh.blend_to_basis_by_distance"
-    bl_label = "Blend to Basis by Distance"
+    bl_label = "Clean Up Small Movements"
     bl_options = {'REGISTER', 'UNDO'}
     
     percentage: bpy.props.FloatProperty(
         name="Percentage",
-        description="How much to blend back to basis (0=no change, 100=full basis)",
-        default=50.0,
+        description="Percentage of least-moved vertices to reset to basis",
+        default=10.0,
         min=0.0,
         max=100.0,
         subtype='PERCENTAGE'
     ) # type: ignore
     
-    distance_mode: bpy.props.EnumProperty(
-        name="Distance Mode",
-        description="How to calculate blend amount based on distance",
+    threshold_mode: bpy.props.EnumProperty(
+        name="Mode",
+        description="How to determine which vertices to clean up",
         items=[
-            ('LINEAR', "Linear", "Vertices that moved more blend more"),
-            ('INVERSE', "Inverse", "Vertices that moved less blend more"),
+            ('PERCENTAGE', "Percentage", "Clean up bottom X% of vertices by movement"),
+            ('THRESHOLD', "Threshold", "Clean up all vertices that move less than threshold"),
         ],
-        default='LINEAR'
+        default='PERCENTAGE'
     ) # type: ignore
     
-    normalize_distance: bpy.props.BoolProperty(
-        name="Normalize Distance",
-        description="Normalize distances so the furthest vertex gets full blend",
-        default=True
+    distance_threshold: bpy.props.FloatProperty(
+        name="Distance Threshold",
+        description="Maximum distance for cleanup (when using Threshold mode)",
+        default=0.001,
+        min=0.0,
+        soft_max=0.1,
+        precision=5
     ) # type: ignore
     
     @classmethod
@@ -257,6 +266,17 @@ class MESH_OT_blend_to_basis_by_distance(bpy.types.Operator):
         return (obj and obj.type == 'MESH' and 
                 obj.data.shape_keys and 
                 obj.active_shape_key_index > 0)
+    
+    def invoke(self, context, event):
+        #get settings from window manager properties
+        wm = context.window_manager
+        if hasattr(wm, 'shapekey_tools_cleanup_mode'):
+            self.threshold_mode = wm.shapekey_tools_cleanup_mode
+        if hasattr(wm, 'shapekey_tools_cleanup_percentage'):
+            self.percentage = wm.shapekey_tools_cleanup_percentage
+        if hasattr(wm, 'shapekey_tools_cleanup_threshold'):
+            self.distance_threshold = wm.shapekey_tools_cleanup_threshold
+        return self.execute(context)
     
     def execute(self, context):
         obj = context.active_object
@@ -272,43 +292,42 @@ class MESH_OT_blend_to_basis_by_distance(bpy.types.Operator):
         if mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
         
-        #calculate distances for all vertices
-        distances = []
-        max_dist = 0.0
+        #calculate distances for all vertices and create sorted list
+        vertex_distances = []
         
         for i in range(len(mesh.vertices)):
             basis_co = basis.data[i].co
             shape_co = active_key.data[i].co
             dist = (shape_co - basis_co).length
-            distances.append(dist)
-            max_dist = max(max_dist, dist)
+            #only include vertices that actually move (not already at basis)
+            if dist > 0.0:
+                vertex_distances.append((i, dist))
         
-        #avoid division by zero
-        if max_dist == 0:
-            self.report({'WARNING'}, "No vertices have moved from basis")
-            return {'CANCELLED'}
+        #check if there's anything to clean
+        if not vertex_distances:
+            self.report({'INFO'}, "No vertices to clean - all are at basis")
+            return {'FINISHED'}
         
-        #blend each vertex
-        factor = self.percentage / 100.0
+        #sort by distance (ascending - least movement first)
+        vertex_distances.sort(key=lambda x: x[1])
         
-        for i, vert in enumerate(mesh.vertices):
-            dist = distances[i]
-            
-            #calculate blend weight based on distance
-            if self.normalize_distance and max_dist > 0:
-                normalized_dist = dist / max_dist
-            else:
-                normalized_dist = dist
-            
-            if self.distance_mode == 'LINEAR':
-                blend_weight = normalized_dist * factor
-            else:  #INVERSE
-                blend_weight = (1.0 - normalized_dist) * factor
-            
-            #blend position
-            basis_co = basis.data[i].co
-            shape_co = active_key.data[i].co
-            active_key.data[i].co = shape_co.lerp(basis_co, blend_weight)
+        #determine which vertices to reset
+        vertices_to_reset = []
+        
+        if self.threshold_mode == 'PERCENTAGE':
+            #calculate how many vertices to reset based on percentage of moving vertices
+            num_to_reset = int(len(vertex_distances) * (self.percentage / 100.0))
+            vertices_to_reset = [v[0] for v in vertex_distances[:num_to_reset]]
+        else:  #THRESHOLD mode
+            #reset all vertices that move less than threshold
+            vertices_to_reset = [v[0] for v in vertex_distances if v[1] <= self.distance_threshold]
+        
+        #reset selected vertices to basis
+        reset_count = 0
+        for vert_idx in vertices_to_reset:
+            basis_co = basis.data[vert_idx].co
+            active_key.data[vert_idx].co = basis_co.copy()
+            reset_count += 1
         
         #update mesh
         mesh.update()
@@ -317,7 +336,13 @@ class MESH_OT_blend_to_basis_by_distance(bpy.types.Operator):
         if mode != 'OBJECT':
             bpy.ops.object.mode_set(mode=mode)
         
-        self.report({'INFO'}, f"Blended vertices to basis by {self.percentage}%")
+        #calculate remaining moving vertices for feedback
+        remaining_moving = len(vertex_distances) - reset_count
+        
+        if self.threshold_mode == 'PERCENTAGE':
+            self.report({'INFO'}, f"Reset {reset_count} vertices ({self.percentage}% of {len(vertex_distances)} moving) - {remaining_moving} still moving")
+        else:
+            self.report({'INFO'}, f"Reset {reset_count} vertices moving less than {self.distance_threshold} - {remaining_moving} still moving")
         return {'FINISHED'}
 
 
@@ -355,22 +380,30 @@ class MESH_PT_shapekey_tools_panel(bpy.types.Panel):
             
             #vertex group blend
             if len(obj.vertex_groups) > 0:
-                row = col.row(align=True)
-                op = row.operator("mesh.blend_shapekey_from_vgroup", icon='GROUP_VERTEX')
-                
                 #add vertex group selector in the ui
                 col.prop_search(
                     context.window_manager, "shapekey_tools_vgroup",
                     obj, "vertex_groups",
                     text="Vertex Group"
                 )
+                col.prop(context.window_manager, "shapekey_tools_vgroup_invert", text="Invert")
+                row = col.row(align=True)
+                row.operator("mesh.blend_shapekey_from_vgroup", icon='GROUP_VERTEX')
             else:
                 col.label(text="No vertex groups", icon='INFO')
             
             col.separator()
             
-            #distance-based blend
-            col.operator("mesh.blend_to_basis_by_distance", icon='ARROW_LEFTRIGHT')
+            #cleanup tool (formerly distance-based blend)
+            col.label(text="Cleanup:")
+            col.prop(context.window_manager, "shapekey_tools_cleanup_mode", text="")
+            
+            if context.window_manager.shapekey_tools_cleanup_mode == 'PERCENTAGE':
+                col.prop(context.window_manager, "shapekey_tools_cleanup_percentage")
+            else:
+                col.prop(context.window_manager, "shapekey_tools_cleanup_threshold")
+            
+            col.operator("mesh.blend_to_basis_by_distance", icon='BRUSH_DATA')
             
         else:
             layout.label(text="Select a shape key (not Basis)")
@@ -381,16 +414,45 @@ def register_props():
     bpy.types.WindowManager.shapekey_tools_vgroup = bpy.props.StringProperty(
         name="Vertex Group",
         description="Vertex group for shape key blending"
-    )
+    ) # type: ignore
+    bpy.types.WindowManager.shapekey_tools_vgroup_invert = bpy.props.BoolProperty(
+        name="Invert",
+        description="Invert the vertex group influence",
+        default=False
+    ) # type: ignore
+    bpy.types.WindowManager.shapekey_tools_cleanup_mode = bpy.props.EnumProperty(
+        name="Mode",
+        description="How to determine which vertices to clean up",
+        items=[
+            ('PERCENTAGE', "Percentage", "Clean up bottom X% of vertices by movement"),
+            ('THRESHOLD', "Threshold", "Clean up all vertices that move less than threshold"),
+        ],
+        default='PERCENTAGE'
+    ) # type: ignore
+    bpy.types.WindowManager.shapekey_tools_cleanup_percentage = bpy.props.FloatProperty(
+        name="Percentage",
+        description="Percentage of least-moved vertices to reset to basis",
+        default=10.0,
+        min=0.0,
+        max=100.0,
+        subtype='PERCENTAGE'
+    ) # type: ignore
+    bpy.types.WindowManager.shapekey_tools_cleanup_threshold = bpy.props.FloatProperty(
+        name="Distance Threshold",
+        description="Maximum distance for cleanup",
+        default=0.001,
+        min=0.0,
+        soft_max=0.1,
+        precision=5
+    ) # type: ignore
 
 
 def unregister_props():
     del bpy.types.WindowManager.shapekey_tools_vgroup
-
-
-#update vertex group blend operator when ui property changes
-def vgroup_update(self, context):
-    return None
+    del bpy.types.WindowManager.shapekey_tools_vgroup_invert
+    del bpy.types.WindowManager.shapekey_tools_cleanup_mode
+    del bpy.types.WindowManager.shapekey_tools_cleanup_percentage
+    del bpy.types.WindowManager.shapekey_tools_cleanup_threshold
 
 
 classes = (
@@ -407,13 +469,6 @@ def register():
     
     for cls in classes:
         bpy.utils.register_class(cls)
-    
-    #make vertex group operator use the ui property
-    def draw_func(self, context):
-        if hasattr(context.window_manager, 'shapekey_tools_vgroup'):
-            self.vertex_group = context.window_manager.shapekey_tools_vgroup
-    
-    MESH_OT_blend_shapekey_from_vgroup.draw = draw_func
 
 
 def unregister():
